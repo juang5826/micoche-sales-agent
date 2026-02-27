@@ -11,6 +11,8 @@ from starlette.concurrency import run_in_threadpool
 
 from app.config import Settings, get_settings
 from app.db_store import PostgresStore
+from app.llm_client import OpenAIHTTPClient
+from app.media_processor import MediaProcessor
 from app.mcp_clients import KommoMCPClient, MCPClientError, SimplyBookMCPClient
 from app.metrics import MetricsRegistry
 from app.models import ChatRequest, ChatResponse, HealthResponse, MCPCallRequest, MCPCallResponse, WebhookAck
@@ -27,7 +29,7 @@ logger = logging.getLogger(settings.app_name)
 
 metrics = MetricsRegistry()
 thread_store = ThreadStore()
-integration_state: dict[str, str] = {"kommo": "unknown", "simplybook": "unknown"}
+integration_state: dict[str, str] = {"kommo": "unknown", "simplybook": "unknown", "postgres": "unknown"}
 db_store = PostgresStore(settings.resolved_supabase_db_url())
 
 kommo_client = KommoMCPClient(
@@ -40,9 +42,21 @@ simplybook_client = SimplyBookMCPClient(
     api_key=settings.simplybook_mcp_api_key,
     timeout_seconds=settings.request_timeout_seconds,
 )
+llm_client = OpenAIHTTPClient(
+    api_key=settings.openai_api_key,
+    model=settings.openai_model,
+    timeout_seconds=settings.request_timeout_seconds,
+    base_url=settings.openai_base_url,
+)
+media_processor = MediaProcessor(
+    llm_client=llm_client if settings.media_enabled else None,
+    timeout_seconds=settings.media_timeout_seconds,
+    max_bytes=settings.media_max_bytes,
+)
 orchestrator = MiCocheMAFOrchestrator(
     kommo=kommo_client,
     simplybook=simplybook_client,
+    llm=llm_client,
 )
 webhook_processor = KommoWebhookProcessor(
     settings=settings,
@@ -50,6 +64,8 @@ webhook_processor = KommoWebhookProcessor(
     orchestrator=orchestrator,
     thread_store=thread_store,
     metrics=metrics,
+    db_store=db_store,
+    media_processor=media_processor,
 )
 
 
@@ -91,7 +107,9 @@ async def lifespan(_: FastAPI):
             integration_state["simplybook"] = "error"
             integration_state["postgres"] = "error"
             raise RuntimeError(str(exc)) from exc
+    await webhook_processor.start()
     yield
+    await webhook_processor.stop()
     db_store.close()
 
 

@@ -43,6 +43,13 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
+    openai_base_url: str = "https://api.openai.com/v1"
+    llm_temperature: float = 0.2
+    llm_max_output_tokens: int = 500
+
+    media_enabled: bool = True
+    media_timeout_seconds: int = 12
+    media_max_bytes: int = 8000000
 
     request_timeout_seconds: int = 25
     startup_validate_integrations: bool = True

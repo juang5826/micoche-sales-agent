@@ -187,8 +187,174 @@ class PostgresStore:
             conn.commit()
         return deleted
 
+    def dedupe_add_if_new(self, event_id: str, ttl_seconds: int) -> bool:
+        if not self.enabled:
+            return True
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM agentes_micoche.webhook_dedupe_events
+                    WHERE expires_at <= NOW();
+                    """
+                )
+                cur.execute(
+                    """
+                    INSERT INTO agentes_micoche.webhook_dedupe_events (event_id, expires_at)
+                    VALUES (%s, NOW() + (%s * INTERVAL '1 second'))
+                    ON CONFLICT (event_id) DO NOTHING;
+                    """,
+                    (event_id, ttl_seconds),
+                )
+                inserted = cur.rowcount == 1
+                if not inserted:
+                    cur.execute(
+                        """
+                        UPDATE agentes_micoche.webhook_dedupe_events
+                        SET expires_at = NOW() + (%s * INTERVAL '1 second'),
+                            created_at = NOW()
+                        WHERE event_id = %s AND expires_at <= NOW();
+                        """,
+                        (ttl_seconds, event_id),
+                    )
+                    inserted = cur.rowcount == 1
+            conn.commit()
+        return inserted
+
+    def buffer_add_message(
+        self,
+        lead_id: int,
+        message: str,
+        event_id: str,
+        context: dict[str, Any],
+        max_messages: int,
+        window_seconds: float,
+    ) -> int:
+        if not self.enabled:
+            return 1
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT messages, event_ids
+                    FROM agentes_micoche.webhook_lead_buffer
+                    WHERE lead_id = %s
+                    FOR UPDATE;
+                    """,
+                    (lead_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    messages = self._to_list(row[0])
+                    event_ids = self._to_list(row[1])
+                else:
+                    messages = []
+                    event_ids = []
+
+                messages.append(message)
+                event_ids.append(event_id)
+                if len(messages) > max_messages:
+                    messages = messages[-max_messages:]
+                    event_ids = event_ids[-max_messages:]
+
+                cur.execute(
+                    """
+                    INSERT INTO agentes_micoche.webhook_lead_buffer
+                        (lead_id, messages, event_ids, context, flush_after, updated_at)
+                    VALUES
+                        (%s, %s, %s, %s, NOW() + (%s * INTERVAL '1 second'), NOW())
+                    ON CONFLICT (lead_id)
+                    DO UPDATE SET
+                        messages = EXCLUDED.messages,
+                        event_ids = EXCLUDED.event_ids,
+                        context = EXCLUDED.context,
+                        flush_after = EXCLUDED.flush_after,
+                        updated_at = NOW();
+                    """,
+                    (
+                        lead_id,
+                        Json(messages),
+                        Json(event_ids),
+                        Json(context),
+                        float(window_seconds),
+                    ),
+                )
+            conn.commit()
+        return len(messages)
+
+    def pop_due_buffers(self, limit: int = 50) -> list[dict[str, Any]]:
+        if not self.enabled:
+            return []
+        batches: list[dict[str, Any]] = []
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT lead_id, messages, event_ids, context
+                    FROM agentes_micoche.webhook_lead_buffer
+                    WHERE flush_after <= NOW()
+                    ORDER BY flush_after ASC
+                    LIMIT %s;
+                    """,
+                    (limit,),
+                )
+                rows = cur.fetchall()
+                lead_ids = [int(row[0]) for row in rows]
+                for row in rows:
+                    batches.append(
+                        {
+                            "lead_id": int(row[0]),
+                            "messages": self._to_list(row[1]),
+                            "event_ids": self._to_list(row[2]),
+                            "context": self._to_dict(row[3]),
+                        }
+                    )
+                if lead_ids:
+                    cur.execute(
+                        "DELETE FROM agentes_micoche.webhook_lead_buffer WHERE lead_id = ANY(%s);",
+                        (lead_ids,),
+                    )
+            conn.commit()
+        return batches
+
+    def drop_buffer_lead(self, lead_id: int) -> None:
+        if not self.enabled:
+            return
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM agentes_micoche.webhook_lead_buffer WHERE lead_id = %s;",
+                    (lead_id,),
+                )
+            conn.commit()
+
+    @staticmethod
+    def _to_list(value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception:  # noqa: BLE001
+                return []
+        return []
+
+    @staticmethod
+    def _to_dict(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:  # noqa: BLE001
+                return {}
+        return {}
+
     def close(self) -> None:
         if self._pool:
             self._pool.closeall()
             self._pool = None
-

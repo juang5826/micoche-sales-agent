@@ -18,6 +18,8 @@
 8. PostgreSQL Supabase:
    - `SUPABASE_DB_URL` (connection string completa con `sslmode=require`), o
    - `SUPABASE_DB_PASSWORD` (el host se infiere desde `KOMMO_MCP_URL`).
+9. `OPENAI_API_KEY` para respuestas LLM y multimedia.
+10. `MEDIA_ENABLED=true` (opcional, por defecto activo).
 
 ## 3) Healthcheck
 
@@ -32,3 +34,4 @@
 2. `POST /mcp/call` con `provider=kommo` y `tool_name=kommo_get_account`.
 3. `POST /mcp/call` con `provider=simplybook` y `tool_name=simplybook_get_company_info`.
 4. Webhook test a `/webhooks/kommo` con payload de ejemplo.
+5. Verificar en `/health` que `kommo`, `simplybook` y `postgres` estén en `ok`.
