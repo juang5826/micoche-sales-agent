@@ -24,15 +24,6 @@ class MCPClient:
     def _url(self, path: str) -> str:
         return f"{self.base_url}/{path.lstrip('/')}"
 
-    def health(self) -> dict[str, Any]:
-        response = requests.get(
-            self._url("/health"),
-            timeout=self.timeout_seconds,
-            headers=self._headers(),
-        )
-        response.raise_for_status()
-        return response.json()
-
     def call_tool(self, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
         payload = {"name": tool_name, "arguments": arguments or {}}
         response = requests.post(
@@ -65,89 +56,3 @@ class KommoMCPClient(MCPClient):
 
     def run_salesbot(self, bot_id: int, lead_id: int) -> dict[str, Any]:
         return self.call_tool("kommo_run_salesbot", {"bot_id": bot_id, "lead_id": lead_id})
-
-    def add_note(self, lead_id: int, text: str) -> dict[str, Any]:
-        return self.call_tool(
-            "kommo_add_note",
-            {"entity_type": "lead", "entity_id": lead_id, "text": text, "note_type": "common"},
-        )
-
-
-class SimplyBookMCPClient(MCPClient):
-    def get_company_info(self) -> dict[str, Any]:
-        return self.call_tool("simplybook_get_company_info", {})
-
-    def get_event_list(self, only_visible: bool = False, only_active: bool = False) -> dict[str, Any]:
-        return self.call_tool(
-            "simplybook_get_event_list",
-            {"only_visible": only_visible, "only_active": only_active},
-        )
-
-    def admin_call(self, method: str, params: list[Any] | None = None) -> Any:
-        return self.call_tool(
-            "simplybook_admin_call",
-            {"method": method, "params": params or []},
-        )
-
-    def _try_tools(self, candidates: list[str], arguments: dict[str, Any]) -> Any:
-        errors: list[str] = []
-        for tool_name in candidates:
-            try:
-                return self.call_tool(tool_name, arguments)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{tool_name}: {exc}")
-                continue
-        raise MCPClientError("No tool candidate succeeded. " + " | ".join(errors))
-
-    def get_available_slots(self, payload: dict[str, Any]) -> Any:
-        tool_candidates = [
-            "simplybook_get_available_slots",
-            "simplybook_get_start_time_matrix",
-            "simplybook_get_time_slots",
-        ]
-        try:
-            return self._try_tools(tool_candidates, payload)
-        except MCPClientError:
-            method_candidates = ["getStartTimeMatrix", "getAvailableTimeSlots", "getTimeSlots"]
-            errors: list[str] = []
-            for method in method_candidates:
-                try:
-                    return self.admin_call(method=method, params=[payload])
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(f"{method}: {exc}")
-            raise MCPClientError("Could not fetch availability. " + " | ".join(errors))
-
-    def create_booking(self, payload: dict[str, Any]) -> Any:
-        tool_candidates = [
-            "simplybook_create_booking",
-            "simplybook_book",
-            "simplybook_add_booking",
-        ]
-        try:
-            return self._try_tools(tool_candidates, payload)
-        except MCPClientError:
-            method_candidates = ["addBooking", "book", "createBooking"]
-            errors: list[str] = []
-            for method in method_candidates:
-                try:
-                    return self.admin_call(method=method, params=[payload])
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(f"{method}: {exc}")
-            raise MCPClientError("Could not create booking. " + " | ".join(errors))
-
-    def cancel_booking(self, payload: dict[str, Any]) -> Any:
-        tool_candidates = [
-            "simplybook_cancel_booking",
-            "simplybook_delete_booking",
-        ]
-        try:
-            return self._try_tools(tool_candidates, payload)
-        except MCPClientError:
-            method_candidates = ["cancelBooking", "deleteBooking"]
-            errors: list[str] = []
-            for method in method_candidates:
-                try:
-                    return self.admin_call(method=method, params=[payload])
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(f"{method}: {exc}")
-            raise MCPClientError("Could not cancel booking. " + " | ".join(errors))

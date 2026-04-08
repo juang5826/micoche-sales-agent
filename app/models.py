@@ -18,18 +18,6 @@ class ChatResponse(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class MCPCallRequest(BaseModel):
-    provider: str = Field(..., description="kommo o simplybook")
-    tool_name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
-
-
-class MCPCallResponse(BaseModel):
-    provider: str
-    tool_name: str
-    data: Any
-
-
 class WebhookAck(BaseModel):
     ok: bool
     event_id: str | None = None
@@ -44,4 +32,3 @@ class HealthResponse(BaseModel):
     environment: str
     tenant: str
     integrations: dict[str, Any] = Field(default_factory=dict)
-

@@ -12,12 +12,10 @@ from starlette.concurrency import run_in_threadpool
 from app.config import Settings, get_settings
 from app.db_store import PostgresStore
 from app.llm_client import OpenAIHTTPClient
-from app.media_processor import MediaProcessor
-from app.mcp_clients import KommoMCPClient, MCPClientError, SimplyBookMCPClient
+from app.mcp_clients import KommoMCPClient
 from app.metrics import MetricsRegistry
-from app.models import ChatRequest, ChatResponse, HealthResponse, MCPCallRequest, MCPCallResponse, WebhookAck
+from app.models import ChatRequest, ChatResponse, HealthResponse, WebhookAck
 from app.orchestrator import MiCocheMAFOrchestrator
-from app.thread_store import ThreadStore
 from app.webhook_processor import KommoWebhookProcessor
 
 settings: Settings = get_settings()
@@ -28,18 +26,16 @@ logging.basicConfig(
 logger = logging.getLogger(settings.app_name)
 
 metrics = MetricsRegistry()
-thread_store = ThreadStore()
-integration_state: dict[str, str] = {"kommo": "unknown", "simplybook": "unknown", "postgres": "unknown"}
+integration_state: dict[str, str] = {
+    "kommo": "unknown",
+    "postgres": "unknown",
+    "openai": "configured" if settings.openai_api_key else "disabled",
+}
 db_store = PostgresStore(settings.resolved_supabase_db_url())
 
 kommo_client = KommoMCPClient(
     base_url=settings.kommo_mcp_url,
     api_key=settings.kommo_mcp_api_key,
-    timeout_seconds=settings.request_timeout_seconds,
-)
-simplybook_client = SimplyBookMCPClient(
-    base_url=settings.simplybook_mcp_url,
-    api_key=settings.simplybook_mcp_api_key,
     timeout_seconds=settings.request_timeout_seconds,
 )
 llm_client = OpenAIHTTPClient(
@@ -48,24 +44,17 @@ llm_client = OpenAIHTTPClient(
     timeout_seconds=settings.request_timeout_seconds,
     base_url=settings.openai_base_url,
 )
-media_processor = MediaProcessor(
-    llm_client=llm_client if settings.media_enabled else None,
-    timeout_seconds=settings.media_timeout_seconds,
-    max_bytes=settings.media_max_bytes,
-)
 orchestrator = MiCocheMAFOrchestrator(
-    kommo=kommo_client,
-    simplybook=simplybook_client,
     llm=llm_client,
+    temperature=settings.llm_temperature,
+    max_output_tokens=settings.llm_max_output_tokens,
 )
 webhook_processor = KommoWebhookProcessor(
     settings=settings,
     kommo_client=kommo_client,
     orchestrator=orchestrator,
-    thread_store=thread_store,
     metrics=metrics,
     db_store=db_store,
-    media_processor=media_processor,
 )
 
 
@@ -77,15 +66,6 @@ def _validate_integrations() -> None:
             f"Kommo subdomain mismatch. expected={settings.expected_subdomain} got={subdomain}"
         )
     integration_state["kommo"] = "ok"
-
-    company = simplybook_client.get_company_info()
-    login = str(company.get("login", "")).strip().lower()
-    expected_login = settings.expected_simplybook_login.strip().lower()
-    if expected_login and login != expected_login:
-        raise RuntimeError(
-            f"SimplyBook login mismatch. expected={expected_login} got={login}"
-        )
-    integration_state["simplybook"] = "ok"
 
     db_health = db_store.health()
     if db_health.enabled:
@@ -104,7 +84,6 @@ async def lifespan(_: FastAPI):
         except Exception as exc:  # noqa: BLE001
             logger.exception("Startup integration validation failed.")
             integration_state["kommo"] = "error"
-            integration_state["simplybook"] = "error"
             integration_state["postgres"] = "error"
             raise RuntimeError(str(exc)) from exc
     await webhook_processor.start()
@@ -137,11 +116,12 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
     metrics.inc("chat_requests_total")
     started = perf_counter()
     inferred_thread = request.thread_id or str(request.context_hint.get("lead_id") or uuid4())
+    user_id = str(request.context_hint.get("user_id")) if request.context_hint.get("user_id") else None
     try:
         await run_in_threadpool(
             db_store.ensure_session,
             inferred_thread,
-            str(request.context_hint.get("user_id")) if request.context_hint.get("user_id") else None,
+            user_id,
             request.context_hint,
         )
         result = await run_in_threadpool(
@@ -150,15 +130,13 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             inferred_thread,
             request.context_hint,
         )
-        thread_store.add_message(inferred_thread, "user", request.message)
-        thread_store.add_message(inferred_thread, "assistant", result.answer)
         await run_in_threadpool(db_store.add_message, inferred_thread, "user", request.message)
         await run_in_threadpool(db_store.add_message, inferred_thread, "assistant", result.answer)
         await run_in_threadpool(
             db_store.log_agent_run,
             inferred_thread,
-            str(request.context_hint.get("user_id")) if request.context_hint.get("user_id") else None,
-            settings.openai_model,
+            user_id,
+            settings.openai_model if llm_client.enabled else None,
             request.message,
             result.answer,
             True,
@@ -177,74 +155,9 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         await run_in_threadpool(
             db_store.log_agent_run,
             inferred_thread,
-            str(request.context_hint.get("user_id")) if request.context_hint.get("user_id") else None,
-            settings.openai_model,
+            user_id,
+            settings.openai_model if llm_client.enabled else None,
             request.message,
-            None,
-            False,
-            int((perf_counter() - started) * 1000),
-            str(exc),
-        )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/mcp/call", response_model=MCPCallResponse)
-async def mcp_call_endpoint(request: MCPCallRequest) -> MCPCallResponse:
-    metrics.inc("mcp_calls_total")
-    started = perf_counter()
-    provider = request.provider.strip().lower()
-    try:
-        if provider == "kommo":
-            data = await run_in_threadpool(
-                kommo_client.call_tool,
-                request.tool_name,
-                request.arguments,
-            )
-        elif provider == "simplybook":
-            data = await run_in_threadpool(
-                simplybook_client.call_tool,
-                request.tool_name,
-                request.arguments,
-            )
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
-        await run_in_threadpool(
-            db_store.log_tool_event,
-            None,
-            None,
-            f"{provider}:{request.tool_name}",
-            request.arguments,
-            data,
-            True,
-            int((perf_counter() - started) * 1000),
-            None,
-        )
-        return MCPCallResponse(provider=provider, tool_name=request.tool_name, data=data)
-    except HTTPException:
-        raise
-    except MCPClientError as exc:
-        metrics.inc("mcp_errors_total")
-        await run_in_threadpool(
-            db_store.log_tool_event,
-            None,
-            None,
-            f"{provider}:{request.tool_name}",
-            request.arguments,
-            None,
-            False,
-            int((perf_counter() - started) * 1000),
-            str(exc),
-        )
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        metrics.inc("mcp_errors_total")
-        logger.exception("MCP call endpoint failed.")
-        await run_in_threadpool(
-            db_store.log_tool_event,
-            None,
-            None,
-            f"{provider}:{request.tool_name}",
-            request.arguments,
             None,
             False,
             int((perf_counter() - started) * 1000),
@@ -267,11 +180,3 @@ async def kommo_webhook_endpoint(request: Request) -> WebhookAck:
         metrics.inc("webhook_errors_total")
         logger.exception("Webhook endpoint failed.")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.delete("/threads/{thread_id}")
-async def delete_thread_endpoint(thread_id: str) -> dict[str, object]:
-    deleted_mem = thread_store.delete(thread_id)
-    deleted_db = await run_in_threadpool(db_store.delete_session, thread_id)
-    await webhook_processor.drop_thread(thread_id)
-    return {"ok": True, "thread_id": thread_id, "deleted": bool(deleted_mem or deleted_db)}

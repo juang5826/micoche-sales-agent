@@ -9,11 +9,9 @@ from urllib.parse import parse_qs
 
 from app.config import Settings
 from app.db_store import PostgresStore
-from app.media_processor import MediaProcessor
 from app.metrics import MetricsRegistry
 from app.mcp_clients import KommoMCPClient
 from app.orchestrator import MiCocheMAFOrchestrator
-from app.thread_store import ThreadStore
 from app.utils import normalize_bool, sanitize_plain_text
 
 logger = logging.getLogger("webhook_processor")
@@ -74,12 +72,6 @@ class LeadMessageBuffer:
             self._entries[lead_id] = entry
             return len(entry.messages)
 
-    async def drop(self, lead_id: int) -> None:
-        async with self._lock:
-            entry = self._entries.pop(lead_id, None)
-            if entry and entry.task and not entry.task.done():
-                entry.task.cancel()
-
     async def _delayed_flush(self, lead_id: int) -> None:
         try:
             await asyncio.sleep(self.window_seconds)
@@ -99,18 +91,14 @@ class KommoWebhookProcessor:
         settings: Settings,
         kommo_client: KommoMCPClient,
         orchestrator: MiCocheMAFOrchestrator,
-        thread_store: ThreadStore,
         metrics: MetricsRegistry,
         db_store: PostgresStore,
-        media_processor: MediaProcessor | None = None,
     ) -> None:
         self.settings = settings
         self.kommo = kommo_client
         self.orchestrator = orchestrator
-        self.thread_store = thread_store
         self.metrics = metrics
         self.db_store = db_store
-        self.media_processor = media_processor
         self.dedupe = DedupeCache(ttl_seconds=settings.dedupe_ttl_seconds)
         self.buffer = LeadMessageBuffer(
             window_seconds=settings.buffer_window_seconds,
@@ -157,18 +145,8 @@ class KommoWebhookProcessor:
             "contact_id": self._to_int(payload.get("message[add][0][contact_id]")),
             "talk_id": payload.get("message[add][0][talk_id]"),
             "author": payload.get("message[add][0][author][name]"),
-            "source": payload.get("message[add][0][source][external_id]"),
             "event_id": event_id,
         }
-
-        if self.media_processor and self.settings.media_enabled:
-            media = await asyncio.to_thread(self.media_processor.enrich_from_payload, payload)
-            if media.summaries:
-                media_block = "\n".join(f"- {item}" for item in media.summaries)
-                message = f"{message}\n\nContexto multimedia:\n{media_block}".strip()
-            if media.errors:
-                context["media_errors"] = media.errors
-                self.metrics.inc("webhook_media_errors_total", len(media.errors))
 
         if self.db_store.enabled:
             count = await asyncio.to_thread(
@@ -189,15 +167,6 @@ class KommoWebhookProcessor:
             )
         self.metrics.inc("webhook_buffered_messages_total")
         return {"ok": True, "buffered": True, "event_id": event_id, "lead_id": lead_id, "buffer_count": count}
-
-    async def drop_thread(self, thread_id: str) -> None:
-        lead_id = self._to_int(thread_id)
-        if not lead_id:
-            return
-        if self.db_store.enabled:
-            await asyncio.to_thread(self.db_store.drop_buffer_lead, lead_id)
-        else:
-            await self.buffer.drop(lead_id)
 
     async def flush_due(self) -> int:
         if not self.db_store.enabled:
@@ -239,6 +208,8 @@ class KommoWebhookProcessor:
         lead_id = batch.lead_id
         thread_id = str(lead_id)
         consolidated = self._consolidate_messages(batch.messages)
+        started = time.perf_counter()
+        user_id = str(batch.context.get("contact_id")) if batch.context.get("contact_id") else None
 
         try:
             lead = self.kommo.get_lead(lead_id=lead_id)
@@ -264,8 +235,6 @@ class KommoWebhookProcessor:
                 context_hint={"lead_id": lead_id, **batch.context},
             )
             plain_response = sanitize_plain_text(answer.answer)
-            self.thread_store.add_message(thread_id, "user", consolidated)
-            self.thread_store.add_message(thread_id, "assistant", plain_response)
 
             self.kommo.upsert_custom_field_value(
                 lead_id=lead_id,
@@ -276,10 +245,43 @@ class KommoWebhookProcessor:
                 bot_id=self.settings.salesbot_id,
                 lead_id=lead_id,
             )
+
+            if self.db_store.enabled:
+                await asyncio.to_thread(
+                    self.db_store.ensure_session,
+                    thread_id,
+                    user_id,
+                    {"lead_id": lead_id, **batch.context},
+                )
+                await asyncio.to_thread(self.db_store.add_message, thread_id, "user", consolidated)
+                await asyncio.to_thread(self.db_store.add_message, thread_id, "assistant", plain_response)
+                await asyncio.to_thread(
+                    self.db_store.log_agent_run,
+                    thread_id,
+                    user_id,
+                    self.settings.openai_model if self.orchestrator.llm and self.orchestrator.llm.enabled else None,
+                    consolidated,
+                    plain_response,
+                    True,
+                    int((time.perf_counter() - started) * 1000),
+                    None,
+                )
             self.metrics.inc("webhook_response_sent_total")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             self.metrics.inc("webhook_flush_errors_total")
             logger.exception("Failed to process flush for lead %s", lead_id)
+            if self.db_store.enabled:
+                await asyncio.to_thread(
+                    self.db_store.log_agent_run,
+                    thread_id,
+                    user_id,
+                    self.settings.openai_model if self.orchestrator.llm and self.orchestrator.llm.enabled else None,
+                    consolidated,
+                    None,
+                    False,
+                    int((time.perf_counter() - started) * 1000),
+                    str(exc),
+                )
 
     def _parse_form_encoded(self, body: str) -> dict[str, str]:
         parsed = parse_qs(body, keep_blank_values=True)

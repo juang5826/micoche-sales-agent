@@ -3,7 +3,6 @@ import asyncio
 from app.config import Settings
 from app.db_store import PostgresStore
 from app.metrics import MetricsRegistry
-from app.thread_store import ThreadStore
 from app.webhook_processor import KommoWebhookProcessor
 
 
@@ -46,16 +45,13 @@ def build_processor() -> KommoWebhookProcessor:
         message_field_id=1890488,
         salesbot_id=86970,
         startup_validate_integrations=False,
-        media_enabled=False,
     )
     return KommoWebhookProcessor(
         settings=settings,
         kommo_client=FakeKommo(),
         orchestrator=FakeOrchestrator(),
-        thread_store=ThreadStore(),
         metrics=MetricsRegistry(),
         db_store=PostgresStore(None),
-        media_processor=None,
     )
 
 
@@ -78,4 +74,3 @@ def test_ingest_dedupe_memory():
     second = asyncio.run(processor.ingest(raw_body=body, headers={}))
     assert first["buffered"] is True
     assert second["reason"] == "duplicate"
-

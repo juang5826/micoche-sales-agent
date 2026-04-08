@@ -1,7 +1,6 @@
 from functools import lru_cache
 from urllib.parse import urlparse
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,7 +20,6 @@ class Settings(BaseSettings):
 
     tenant_key: str = "micoche"
     expected_subdomain: str = "auxcontablemicoche"
-    expected_simplybook_login: str = "micochemos"
     expected_source_id: str = "573174274959"
     switch_field_id: int = 1631120
     message_field_id: int = 1890488
@@ -31,25 +29,14 @@ class Settings(BaseSettings):
     buffer_max_messages: int = 8
     dedupe_ttl_seconds: int = 900
 
-    kommo_mcp_url: str = Field(
-        default="https://tgvfvsruvfzrmfohbgwx.supabase.co/functions/v1/kommo-mcp"
-    )
+    kommo_mcp_url: str = "https://tgvfvsruvfzrmfohbgwx.supabase.co/functions/v1/kommo-mcp"
     kommo_mcp_api_key: str | None = None
-
-    simplybook_mcp_url: str = Field(
-        default="https://tgvfvsruvfzrmfohbgwx.supabase.co/functions/v1/simplybook-mcp"
-    )
-    simplybook_mcp_api_key: str | None = None
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
     openai_base_url: str = "https://api.openai.com/v1"
     llm_temperature: float = 0.2
     llm_max_output_tokens: int = 500
-
-    media_enabled: bool = True
-    media_timeout_seconds: int = 12
-    media_max_bytes: int = 8000000
 
     request_timeout_seconds: int = 25
     startup_validate_integrations: bool = True
