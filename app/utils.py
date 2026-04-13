@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 
 def normalize_bool(value: object) -> bool | None:
@@ -16,8 +17,39 @@ def normalize_bool(value: object) -> bool | None:
     return None
 
 
+_ESCALATION_MARKER = re.compile(r"\[ESCALAR\]", re.IGNORECASE)
+_MARKDOWN_CHARS = re.compile(r"[*`#~_]")
+_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+_PHONE_PATTERN = re.compile(r"\b\d{10,13}\b")
+_ALLOWED_PHONES = {"573134246298"}
+_MAX_RESPONSE_CHARS = 800
+
+
 def sanitize_plain_text(text: str) -> str:
-    out = text.replace("*", "").replace("`", "")
+    out = _MARKDOWN_CHARS.sub("", text)
     out = re.sub(r"\s+\n", "\n", out)
     return out.strip()
 
+
+@dataclass
+class FilteredResponse:
+    text: str
+    should_escalate: bool
+
+
+def filter_agent_output(raw: str) -> FilteredResponse:
+    should_escalate = bool(_ESCALATION_MARKER.search(raw))
+    text = _ESCALATION_MARKER.sub("", raw).strip()
+    text = sanitize_plain_text(text)
+    text = _URL_PATTERN.sub("", text).strip()
+    text = _filter_phones(text)
+    if len(text) > _MAX_RESPONSE_CHARS:
+        text = text[:_MAX_RESPONSE_CHARS].rsplit(" ", 1)[0] + "..."
+    return FilteredResponse(text=text, should_escalate=should_escalate)
+
+
+def _filter_phones(text: str) -> str:
+    def _replace(match: re.Match) -> str:
+        phone = match.group(0)
+        return phone if phone in _ALLOWED_PHONES else ""
+    return _PHONE_PATTERN.sub(_replace, text).strip()

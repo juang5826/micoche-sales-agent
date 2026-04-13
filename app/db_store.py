@@ -98,6 +98,24 @@ class PostgresStore:
                 )
             conn.commit()
 
+    def get_recent_messages(self, session_id: str, limit: int = 10) -> list[dict[str, str]]:
+        if not self.enabled:
+            return []
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role, content
+                    FROM agentes_micoche.chat_messages
+                    WHERE session_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s;
+                    """,
+                    (session_id, limit),
+                )
+                rows = cur.fetchall()
+        return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
     def log_tool_event(
         self,
         session_id: str | None,
@@ -207,17 +225,6 @@ class PostgresStore:
                     (event_id, ttl_seconds),
                 )
                 inserted = cur.rowcount == 1
-                if not inserted:
-                    cur.execute(
-                        """
-                        UPDATE agentes_micoche.webhook_dedupe_events
-                        SET expires_at = NOW() + (%s * INTERVAL '1 second'),
-                            created_at = NOW()
-                        WHERE event_id = %s AND expires_at <= NOW();
-                        """,
-                        (ttl_seconds, event_id),
-                    )
-                    inserted = cur.rowcount == 1
             conn.commit()
         return inserted
 
@@ -290,17 +297,20 @@ class PostgresStore:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT lead_id, messages, event_ids, context
-                    FROM agentes_micoche.webhook_lead_buffer
-                    WHERE flush_after <= NOW()
-                    ORDER BY flush_after ASC
-                    LIMIT %s;
+                    DELETE FROM agentes_micoche.webhook_lead_buffer
+                    WHERE lead_id IN (
+                        SELECT lead_id
+                        FROM agentes_micoche.webhook_lead_buffer
+                        WHERE flush_after <= NOW()
+                        ORDER BY flush_after ASC
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    RETURNING lead_id, messages, event_ids, context;
                     """,
                     (limit,),
                 )
-                rows = cur.fetchall()
-                lead_ids = [int(row[0]) for row in rows]
-                for row in rows:
+                for row in cur.fetchall():
                     batches.append(
                         {
                             "lead_id": int(row[0]),
@@ -308,11 +318,6 @@ class PostgresStore:
                             "event_ids": self._to_list(row[2]),
                             "context": self._to_dict(row[3]),
                         }
-                    )
-                if lead_ids:
-                    cur.execute(
-                        "DELETE FROM agentes_micoche.webhook_lead_buffer WHERE lead_id = ANY(%s);",
-                        (lead_ids,),
                     )
             conn.commit()
         return batches
