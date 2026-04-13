@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.llm_client import LLMClientError, OpenAIHTTPClient
-from app.micoche_knowledge import MICOHE_INFO_BASE, MICOHE_INFO_PROMPT
+from app.micoche_knowledge import MICOCHE_INFO_BASE, MICOCHE_INFO_PROMPT
 from app.utils import sanitize_plain_text
 
 
@@ -41,16 +41,22 @@ class MiCocheMAFOrchestrator:
         if self.llm and self.llm.enabled:
             try:
                 answer = self.llm.generate_text(
-                    system_prompt=f"{MICOHE_INFO_PROMPT}\n\nBase de conocimiento:\n{MICOHE_INFO_BASE}",
+                    system_prompt=f"{MICOCHE_INFO_PROMPT}\n\nBase de conocimiento:\n{MICOCHE_INFO_BASE}",
                     user_message=message,
                     context={"thread_id": thread_id, **context_hint},
                     max_output_tokens=self.max_output_tokens,
                     temperature=self.temperature,
                 )
+                usage = self.llm.last_usage
                 return OrchestratorResult(
                     route="informacion_micoche",
                     answer=sanitize_plain_text(answer),
-                    metadata={"thread_id": thread_id, "used_llm": True},
+                    metadata={
+                        "thread_id": thread_id,
+                        "used_llm": True,
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                    },
                 )
             except LLMClientError:
                 pass

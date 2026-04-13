@@ -5,8 +5,17 @@ from typing import Any
 import requests
 
 
+from dataclasses import dataclass
+
+
 class LLMClientError(Exception):
     pass
+
+
+@dataclass
+class LLMUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class OpenAIHTTPClient:
@@ -21,6 +30,7 @@ class OpenAIHTTPClient:
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.base_url = base_url.rstrip("/")
+        self.last_usage = LLMUsage()
 
     @property
     def enabled(self) -> bool:
@@ -69,8 +79,11 @@ class OpenAIHTTPClient:
 
         context_block = ""
         if context:
-            context_lines = [f"- {k}: {v}" for k, v in context.items()]
-            context_block = "Contexto interno:\n" + "\n".join(context_lines)
+            _internal_keys = {"thread_id", "lead_id", "contact_id", "talk_id", "event_id", "user_id"}
+            safe_context = {k: v for k, v in context.items() if k not in _internal_keys}
+            if safe_context:
+                context_lines = [f"- {k}: {v}" for k, v in safe_context.items()]
+                context_block = "Contexto:\n" + "\n".join(context_lines)
 
         payload = {
             "model": self.model,
@@ -104,4 +117,13 @@ class OpenAIHTTPClient:
         text = self._parse_output_text(data)
         if not text:
             raise LLMClientError("OpenAI response contained no text output.")
+        self.last_usage = self._parse_usage(data)
         return text.strip()
+
+    @staticmethod
+    def _parse_usage(data: dict[str, Any]) -> LLMUsage:
+        usage = data.get("usage") or {}
+        return LLMUsage(
+            input_tokens=int(usage.get("input_tokens", 0)),
+            output_tokens=int(usage.get("output_tokens", 0)),
+        )

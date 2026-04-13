@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ from app.db_store import PostgresStore
 from app.metrics import MetricsRegistry
 from app.mcp_clients import KommoMCPClient
 from app.orchestrator import MiCocheMAFOrchestrator
-from app.utils import normalize_bool, sanitize_plain_text
+from app.utils import filter_agent_output, normalize_bool, sanitize_plain_text
 
 logger = logging.getLogger("webhook_processor")
 
@@ -234,7 +235,8 @@ class KommoWebhookProcessor:
                 thread_id=thread_id,
                 context_hint={"lead_id": lead_id, **batch.context},
             )
-            plain_response = sanitize_plain_text(answer.answer)
+            filtered = filter_agent_output(answer.answer)
+            plain_response = filtered.text
 
             self.kommo.upsert_custom_field_value(
                 lead_id=lead_id,
@@ -267,6 +269,11 @@ class KommoWebhookProcessor:
                     None,
                 )
             self.metrics.inc("webhook_response_sent_total")
+            self.metrics.inc("llm_input_tokens_total", answer.metadata.get("input_tokens", 0))
+            self.metrics.inc("llm_output_tokens_total", answer.metadata.get("output_tokens", 0))
+            if filtered.should_escalate:
+                self.metrics.inc("webhook_escalations_total")
+                logger.info("Lead %s marked for escalation to human.", lead_id)
         except Exception as exc:  # noqa: BLE001
             self.metrics.inc("webhook_flush_errors_total")
             logger.exception("Failed to process flush for lead %s", lead_id)
@@ -298,8 +305,15 @@ class KommoWebhookProcessor:
             payload.get("message[add][0][id]")
             or payload.get("message[add][0][chat_id]")
             or headers.get("x-amocrm-requestid")
-            or f"{int(time.time())}:{payload.get('message[add][0][entity_id]', 'unknown')}"
+            or self._hash_fallback_event_id(payload)
         )
+
+    @staticmethod
+    def _hash_fallback_event_id(payload: dict[str, str]) -> str:
+        entity = payload.get("message[add][0][entity_id]", "unknown")
+        text = payload.get("message[add][0][text]", "")
+        raw = f"{int(time.time())}:{entity}:{text}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def _extract_lead_id(self, payload: dict[str, str]) -> int | None:
         return (
@@ -350,7 +364,7 @@ class KommoWebhookProcessor:
     def _consolidate_messages(self, messages: list[str]) -> str:
         if len(messages) <= 1:
             return messages[0] if messages else ""
-        return "\n".join([f"{index + 1}. {msg}" for index, msg in enumerate(messages)])
+        return "\n".join(messages)
 
     @staticmethod
     def _to_int(value: Any) -> int | None:

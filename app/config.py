@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     tenant_key: str = "micoche"
     expected_subdomain: str = "auxcontablemicoche"
-    expected_source_id: str = "573174274959"
+    expected_source_id: str = "573134246298"
     switch_field_id: int = 1631120
     message_field_id: int = 1890488
     salesbot_id: int = 86970
@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     llm_temperature: float = 0.2
     llm_max_output_tokens: int = 500
+
+    webhook_shared_secret: str | None = None
 
     request_timeout_seconds: int = 25
     startup_validate_integrations: bool = True

@@ -12,8 +12,8 @@ class FakeKommo:
             "id": lead_id,
             "status_id": 1,
             "pipeline_id": 1,
-            "source_id": "573174274959",
-            "_embedded": {"source": {"name": "573174274959"}},
+            "source_id": "573134246298",
+            "_embedded": {"source": {"name": "573134246298"}},
             "custom_fields_values": [],
         }
 
@@ -40,7 +40,7 @@ def build_processor() -> KommoWebhookProcessor:
         dedupe_ttl_seconds=900,
         buffer_window_seconds=0.01,
         buffer_max_messages=8,
-        expected_source_id="573174274959",
+        expected_source_id="573134246298",
         switch_field_id=1631120,
         message_field_id=1890488,
         salesbot_id=86970,

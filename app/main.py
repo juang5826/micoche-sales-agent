@@ -81,11 +81,10 @@ async def lifespan(_: FastAPI):
     if settings.startup_validate_integrations:
         try:
             await run_in_threadpool(_validate_integrations)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Startup integration validation failed.")
-            integration_state["kommo"] = "error"
-            integration_state["postgres"] = "error"
-            raise RuntimeError(str(exc)) from exc
+        except Exception:  # noqa: BLE001
+            logger.exception("Startup integration validation failed — running in degraded mode.")
+            integration_state.setdefault("kommo", "error")
+            integration_state.setdefault("postgres", "error")
     await webhook_processor.start()
     yield
     await webhook_processor.stop()
@@ -168,6 +167,11 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
 
 @app.post("/webhooks/kommo", response_model=WebhookAck)
 async def kommo_webhook_endpoint(request: Request) -> WebhookAck:
+    if settings.webhook_shared_secret:
+        token = request.query_params.get("token", "")
+        if token != settings.webhook_shared_secret:
+            metrics.inc("webhook_auth_rejected_total")
+            raise HTTPException(status_code=403, detail="Invalid webhook token")
     try:
         body = await request.body()
         headers = {k.lower(): v for k, v in request.headers.items()}
