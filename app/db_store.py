@@ -98,6 +98,24 @@ class PostgresStore:
                 )
             conn.commit()
 
+    def get_recent_messages(self, session_id: str, limit: int = 10) -> list[dict[str, str]]:
+        if not self.enabled:
+            return []
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role, content
+                    FROM agentes_micoche.chat_messages
+                    WHERE session_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s;
+                    """,
+                    (session_id, limit),
+                )
+                rows = cur.fetchall()
+        return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
     def log_tool_event(
         self,
         session_id: str | None,

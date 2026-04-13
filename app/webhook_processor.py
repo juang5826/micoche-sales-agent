@@ -10,6 +10,7 @@ from urllib.parse import parse_qs
 
 from app.config import Settings
 from app.db_store import PostgresStore
+from app.media_processor import MediaProcessor, AUDIO_MIMES, IMAGE_MIMES
 from app.metrics import MetricsRegistry
 from app.mcp_clients import KommoMCPClient
 from app.orchestrator import MiCocheMAFOrchestrator
@@ -94,12 +95,14 @@ class KommoWebhookProcessor:
         orchestrator: MiCocheMAFOrchestrator,
         metrics: MetricsRegistry,
         db_store: PostgresStore,
+        media_processor: MediaProcessor | None = None,
     ) -> None:
         self.settings = settings
         self.kommo = kommo_client
         self.orchestrator = orchestrator
         self.metrics = metrics
         self.db_store = db_store
+        self.media = media_processor
         self.dedupe = DedupeCache(ttl_seconds=settings.dedupe_ttl_seconds)
         self.buffer = LeadMessageBuffer(
             window_seconds=settings.buffer_window_seconds,
@@ -261,7 +264,7 @@ class KommoWebhookProcessor:
                     self.db_store.log_agent_run,
                     thread_id,
                     user_id,
-                    self.settings.openai_model if self.orchestrator.llm and self.orchestrator.llm.enabled else None,
+                    self.settings.openai_model if self.orchestrator.enabled else None,
                     consolidated,
                     plain_response,
                     True,
@@ -274,6 +277,15 @@ class KommoWebhookProcessor:
             if filtered.should_escalate:
                 self.metrics.inc("webhook_escalations_total")
                 logger.info("Lead %s marked for escalation to human.", lead_id)
+                try:
+                    self.kommo.upsert_custom_field_value(
+                        lead_id=lead_id,
+                        field_id=self.settings.switch_field_id,
+                        value=True,
+                    )
+                    logger.info("Lead %s: IA switch activated — human takeover.", lead_id)
+                except Exception:
+                    logger.exception("Failed to activate IA switch for lead %s", lead_id)
         except Exception as exc:  # noqa: BLE001
             self.metrics.inc("webhook_flush_errors_total")
             logger.exception("Failed to process flush for lead %s", lead_id)
@@ -282,7 +294,7 @@ class KommoWebhookProcessor:
                     self.db_store.log_agent_run,
                     thread_id,
                     user_id,
-                    self.settings.openai_model if self.orchestrator.llm and self.orchestrator.llm.enabled else None,
+                    self.settings.openai_model if self.orchestrator.enabled else None,
                     consolidated,
                     None,
                     False,
@@ -323,12 +335,57 @@ class KommoWebhookProcessor:
         )
 
     def _extract_message_text(self, payload: dict[str, str]) -> str:
-        return (
+        raw = (
             payload.get("message[add][0][text]")
             or payload.get("message[add][0][message]")
             or payload.get("message[add][0][caption]")
-            or "(mensaje sin texto)"
+            or ""
         ).strip()
+
+        # Check for media URL in the payload
+        media_url = (
+            payload.get("message[add][0][media]")
+            or payload.get("message[add][0][file_url]")
+            or payload.get("message[add][0][attachment][link]")
+            or ""
+        ).strip()
+        content_type = (
+            payload.get("message[add][0][content_type]")
+            or payload.get("message[add][0][media_type]")
+            or payload.get("message[add][0][attachment][type]")
+            or ""
+        ).strip()
+
+        # Try to process media if we have a URL and a media processor
+        if media_url and self.media and self.media.enabled:
+            media_type = self.media.detect_media_type(content_type)
+
+            if media_type == "audio":
+                self.metrics.inc("media_audio_received_total")
+                result = self.media.process_media_url(media_url, content_type)
+                if result.success and result.text:
+                    self.metrics.inc("media_audio_transcribed_total")
+                    # Combine caption (if any) with transcription
+                    prefix = f"{raw}\n" if raw else ""
+                    return f"{prefix}(audio transcrito) {result.text}"
+
+            elif media_type == "image":
+                self.metrics.inc("media_image_received_total")
+                result = self.media.process_media_url(media_url, content_type)
+                if result.success and result.text:
+                    self.metrics.inc("media_image_analyzed_total")
+                    prefix = f"{raw}\n" if raw else ""
+                    return f"{prefix}(imagen recibida) {result.text}"
+
+        # Normalize unsupported media messages
+        _unsupported = (
+            "messagecontextinfo is not yet supported",
+            "this message type can't be displayed",
+            "this message type can not be displayed",
+        )
+        if raw.lower() in _unsupported or not raw:
+            return "(el cliente envio un archivo, imagen o audio que no se puede leer)"
+        return raw
 
     def _is_source_allowed(self, lead: dict[str, Any]) -> bool:
         expected = self.settings.expected_source_id.strip()

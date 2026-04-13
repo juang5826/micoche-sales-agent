@@ -11,11 +11,12 @@ from starlette.concurrency import run_in_threadpool
 
 from app.config import Settings, get_settings
 from app.db_store import PostgresStore
-from app.llm_client import OpenAIHTTPClient
 from app.mcp_clients import KommoMCPClient
+from app.media_processor import MediaProcessor
 from app.metrics import MetricsRegistry
 from app.models import ChatRequest, ChatResponse, HealthResponse, WebhookAck
 from app.orchestrator import MiCocheMAFOrchestrator
+from app.rag_client import RAGClient
 from app.webhook_processor import KommoWebhookProcessor
 
 settings: Settings = get_settings()
@@ -38,23 +39,37 @@ kommo_client = KommoMCPClient(
     api_key=settings.kommo_mcp_api_key,
     timeout_seconds=settings.request_timeout_seconds,
 )
-llm_client = OpenAIHTTPClient(
+
+rag_client = RAGClient(
+    openai_api_key=settings.openai_api_key or "",
+    supabase_url=settings.supabase_url,
+    supabase_service_key=settings.supabase_service_key or settings.kommo_mcp_api_key or "",
+    embedding_model=settings.rag_embedding_model,
+    match_threshold=settings.rag_match_threshold,
+    match_count=settings.rag_match_count,
+)
+
+orchestrator = MiCocheMAFOrchestrator(
     api_key=settings.openai_api_key,
     model=settings.openai_model,
-    timeout_seconds=settings.request_timeout_seconds,
-    base_url=settings.openai_base_url,
-)
-orchestrator = MiCocheMAFOrchestrator(
-    llm=llm_client,
     temperature=settings.llm_temperature,
     max_output_tokens=settings.llm_max_output_tokens,
+    rag_client=rag_client,
+    db_store=db_store,
 )
+
+media_processor = MediaProcessor(
+    openai_api_key=settings.openai_api_key or "",
+    vision_model=settings.openai_model,
+)
+
 webhook_processor = KommoWebhookProcessor(
     settings=settings,
     kommo_client=kommo_client,
     orchestrator=orchestrator,
     metrics=metrics,
     db_store=db_store,
+    media_processor=media_processor,
 )
 
 
@@ -135,7 +150,7 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             db_store.log_agent_run,
             inferred_thread,
             user_id,
-            settings.openai_model if llm_client.enabled else None,
+            settings.openai_model if orchestrator.enabled else None,
             request.message,
             result.answer,
             True,
@@ -155,7 +170,7 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             db_store.log_agent_run,
             inferred_thread,
             user_id,
-            settings.openai_model if llm_client.enabled else None,
+            settings.openai_model if orchestrator.enabled else None,
             request.message,
             None,
             False,

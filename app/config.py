@@ -32,10 +32,16 @@ class Settings(BaseSettings):
     kommo_mcp_url: str = "https://tgvfvsruvfzrmfohbgwx.supabase.co/functions/v1/kommo-mcp"
     kommo_mcp_api_key: str | None = None
 
+    supabase_url: str = "https://tgvfvsruvfzrmfohbgwx.supabase.co"
+    supabase_service_key: str | None = None
+    rag_embedding_model: str = "text-embedding-3-small"
+    rag_match_threshold: float = 0.45
+    rag_match_count: int = 5
+
     openai_api_key: str | None = None
-    openai_model: str = "gpt-4.1-mini"
+    openai_model: str = "gpt-5.4-mini"
     openai_base_url: str = "https://api.openai.com/v1"
-    llm_temperature: float = 0.2
+    llm_temperature: float = 0.5
     llm_max_output_tokens: int = 500
 
     webhook_shared_secret: str | None = None
