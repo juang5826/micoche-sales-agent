@@ -61,7 +61,9 @@ class Settings(BaseSettings):
     supabase_db_password: str | None = None
     supabase_db_user: str = "postgres"
     supabase_db_name: str = "postgres"
-    supabase_db_pooler_region: str = "us-east-1"
+    # Full pooler host override — set this if auto-detection fails.
+    # Example: aws-1-us-east-1.pooler.supabase.com
+    supabase_db_pooler_host: str = "aws-1-us-east-1.pooler.supabase.com"
 
     def resolved_supabase_db_url(self) -> str | None:
         explicit = (self.supabase_db_url or "").strip()
@@ -79,7 +81,7 @@ class Settings(BaseSettings):
         # Use Supabase Session Pooler (IPv4) — direct connection resolves
         # to IPv6 which fails on many VPS providers (Hostinger, etc.)
         safe_password = quote_plus(password)
-        pooler_host = f"aws-0-{self.supabase_db_pooler_region}.pooler.supabase.com"
+        pooler_host = self.supabase_db_pooler_host
         pooler_user = f"postgres.{project_ref}"
         return (
             f"postgresql://{pooler_user}:{safe_password}"
