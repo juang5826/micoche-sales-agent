@@ -46,6 +46,15 @@ class Settings(BaseSettings):
 
     webhook_shared_secret: str | None = None
 
+    # Pipeline filter — only respond to leads in these pipeline IDs.
+    # Default: Call center (12372259). Empty list = respond to all.
+    allowed_pipeline_ids: list[int] = [12372259]
+    # Skip leads in closed statuses (142=won, 143=lost)
+    skip_closed_statuses: bool = True
+    # Phone whitelist for testing — only these numbers trigger the agent.
+    # Empty list = respond to all. Format: ["573204549502"]
+    test_phone_whitelist: list[str] = ["573204549502"]
+
     request_timeout_seconds: int = 25
     startup_validate_integrations: bool = True
     supabase_db_url: str | None = None
