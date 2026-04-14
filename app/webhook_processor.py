@@ -227,6 +227,11 @@ class KommoWebhookProcessor:
             logger.info("Lead %s skipped due source mismatch.", lead_id)
             return
 
+        if not self._is_pipeline_allowed(lead):
+            self.metrics.inc("webhook_skipped_pipeline_total")
+            logger.info("Lead %s skipped — not in allowed pipeline.", lead_id)
+            return
+
         if self._is_switch_active(lead):
             self.metrics.inc("webhook_skipped_switch_total")
             logger.info("Lead %s skipped due IA switch active.", lead_id)
@@ -404,6 +409,21 @@ class KommoWebhookProcessor:
             str(source_id).strip(),
         }
         return expected in candidates
+
+    def _is_pipeline_allowed(self, lead: dict[str, Any]) -> bool:
+        """Check if the lead is in an allowed pipeline and not in a closed status."""
+        allowed = self.settings.allowed_pipeline_ids
+        if allowed:
+            pipeline_id = lead.get("pipeline_id")
+            if pipeline_id is not None and int(pipeline_id) not in allowed:
+                return False
+
+        if self.settings.skip_closed_statuses:
+            status_id = lead.get("status_id")
+            if status_id is not None and int(status_id) in (142, 143):
+                return False
+
+        return True
 
     def _is_switch_active(self, lead: dict[str, Any]) -> bool:
         fields = lead.get("custom_fields_values") or []

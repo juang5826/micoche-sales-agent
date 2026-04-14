@@ -46,6 +46,12 @@ class Settings(BaseSettings):
 
     webhook_shared_secret: str | None = None
 
+    # Pipeline filter — only respond to leads in these pipeline IDs
+    # Default: Whatsapp pipeline (11920672). Empty list = respond to all.
+    allowed_pipeline_ids: list[int] = [11920672]
+    # Skip leads in closed statuses (142=won, 143=lost)
+    skip_closed_statuses: bool = True
+
     request_timeout_seconds: int = 25
     startup_validate_integrations: bool = True
     supabase_db_url: str | None = None
