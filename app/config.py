@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     tenant_key: str = "micoche"
     expected_subdomain: str = "auxcontablemicoche"
-    expected_source_id: str = "573134246298"
+    expected_source_id: str = ""
     switch_field_id: int = 1631120
     message_field_id: int = 1890488
     salesbot_id: int = 86970

@@ -407,19 +407,23 @@ class KommoWebhookProcessor:
         source_external_id = source_obj.get("external_id")
         source_obj_id = source_obj.get("id")
         source_id = lead.get("source_id")
-        candidates = {
+        raw_candidates = {
             str(source_name).strip(),
             str(source_external_id).strip(),
             str(source_obj_id).strip(),
             str(source_id).strip(),
         }
-        # If no source data at all (API doesn't return it), allow the lead
-        # — pipeline + phone filters are strict enough for safety
-        candidates.discard("None")
-        if not candidates:
+        # Remove null-like values
+        raw_candidates.discard("None")
+        raw_candidates.discard("")
+        raw_candidates.discard("0")
+        if not raw_candidates:
             logger.debug("Lead %s has no source data — allowing.", lead.get("id"))
             return True
-        return expected in candidates
+        # Normalize: strip +, spaces, dashes for flexible matching
+        norm = lambda v: v.replace("+", "").replace(" ", "").replace("-", "").strip()
+        norm_expected = norm(expected)
+        return any(norm(c) == norm_expected for c in raw_candidates)
 
     def _is_pipeline_allowed(self, lead: dict[str, Any]) -> bool:
         """Check if the lead is in an allowed pipeline and not in a closed status."""
