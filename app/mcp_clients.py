@@ -48,6 +48,9 @@ class KommoMCPClient(MCPClient):
     def get_lead(self, lead_id: int) -> dict[str, Any]:
         return self.call_tool("kommo_get_lead", {"lead_id": lead_id})
 
+    def get_contact(self, contact_id: int) -> dict[str, Any]:
+        return self.call_tool("kommo_get_contact", {"contact_id": contact_id})
+
     def upsert_custom_field_value(self, lead_id: int, field_id: int, value: Any) -> dict[str, Any]:
         return self.call_tool(
             "kommo_upsert_custom_field_value",
