@@ -1,5 +1,5 @@
 from functools import lru_cache
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     supabase_db_password: str | None = None
     supabase_db_user: str = "postgres"
     supabase_db_name: str = "postgres"
+    supabase_db_pooler_region: str = "us-east-1"
 
     def resolved_supabase_db_url(self) -> str | None:
         explicit = (self.supabase_db_url or "").strip()
@@ -62,26 +63,32 @@ class Settings(BaseSettings):
         if not password:
             return None
 
-        host = self._infer_supabase_db_host_from_mcp()
-        if not host:
-            return None
-        return (
-            f"postgresql://{self.supabase_db_user}:{password}"
-            f"@{host}:5432/{self.supabase_db_name}?sslmode=require"
-        )
-
-    def _infer_supabase_db_host_from_mcp(self) -> str | None:
-        parsed = urlparse(self.kommo_mcp_url)
-        netloc = parsed.netloc.strip().lower()
-        if not netloc:
-            return None
-        parts = netloc.split(".")
-        if len(parts) < 3:
-            return None
-        project_ref = parts[0]
+        project_ref = self._infer_project_ref()
         if not project_ref:
             return None
-        return f"db.{project_ref}.supabase.co"
+
+        # Use Supabase Session Pooler (IPv4) — direct connection resolves
+        # to IPv6 which fails on many VPS providers (Hostinger, etc.)
+        safe_password = quote_plus(password)
+        pooler_host = f"aws-0-{self.supabase_db_pooler_region}.pooler.supabase.com"
+        pooler_user = f"postgres.{project_ref}"
+        return (
+            f"postgresql://{pooler_user}:{safe_password}"
+            f"@{pooler_host}:5432/{self.supabase_db_name}?sslmode=require"
+        )
+
+    def _infer_project_ref(self) -> str | None:
+        """Extract Supabase project reference from known URLs."""
+        # Try from supabase_url first, then kommo_mcp_url
+        for url in (self.supabase_url, self.kommo_mcp_url):
+            parsed = urlparse(url)
+            netloc = parsed.netloc.strip().lower()
+            if not netloc:
+                continue
+            parts = netloc.split(".")
+            if len(parts) >= 3 and parts[0]:
+                return parts[0]
+        return None
 
 
 @lru_cache(maxsize=1)
