@@ -207,6 +207,32 @@ class KommoWebhookProcessor:
             )
         return await self.dedupe.add_if_new(event_id)
 
+    async def _log_skip(
+        self,
+        thread_id: str,
+        user_id: str | None,
+        consolidated: str,
+        reason: str,
+        started: float,
+    ) -> None:
+        """Log a skipped batch into agent_runs for observability."""
+        if not self.db_store.enabled:
+            return
+        try:
+            await asyncio.to_thread(
+                self.db_store.log_agent_run,
+                thread_id,
+                user_id,
+                None,
+                consolidated,
+                None,
+                False,
+                int((time.perf_counter() - started) * 1000),
+                reason,
+            )
+        except Exception:
+            logger.exception("Failed to log skip for lead %s", thread_id)
+
     async def _flush_batch(self, batch: LeadBatch) -> None:
         self.metrics.inc("webhook_flush_batches_total")
         lead_id = batch.lead_id
@@ -215,31 +241,55 @@ class KommoWebhookProcessor:
         started = time.perf_counter()
         user_id = str(batch.context.get("contact_id")) if batch.context.get("contact_id") else None
 
+        # Always persist the incoming customer message — even if the batch
+        # ends up being skipped below. This way we keep collecting data
+        # from every CRM conversation to keep improving the agent later.
+        if self.db_store.enabled:
+            try:
+                await asyncio.to_thread(
+                    self.db_store.ensure_session,
+                    thread_id,
+                    user_id,
+                    {"lead_id": lead_id, **batch.context},
+                )
+                await asyncio.to_thread(
+                    self.db_store.add_message, thread_id, "user", consolidated
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist inbound user message for lead %s", lead_id
+                )
+
         try:
             lead = self.kommo.get_lead(lead_id=lead_id)
         except Exception:  # noqa: BLE001
             self.metrics.inc("webhook_flush_errors_total")
             logger.exception("Failed to retrieve lead %s during flush.", lead_id)
+            await self._log_skip(thread_id, user_id, consolidated, "lead_fetch_failed", started)
             return
 
         if not self._is_source_allowed(lead):
             self.metrics.inc("webhook_skipped_source_total")
             logger.info("Lead %s skipped due source mismatch.", lead_id)
+            await self._log_skip(thread_id, user_id, consolidated, "skipped_source", started)
             return
 
         if not self._is_pipeline_allowed(lead):
             self.metrics.inc("webhook_skipped_pipeline_total")
             logger.info("Lead %s skipped — pipeline %s not allowed.", lead_id, lead.get("pipeline_id"))
+            await self._log_skip(thread_id, user_id, consolidated, "skipped_pipeline", started)
             return
 
         if not self._is_phone_allowed(lead, batch.context.get("contact_id")):
             self.metrics.inc("webhook_skipped_phone_total")
             logger.info("Lead %s skipped — contact phone not in whitelist.", lead_id)
+            await self._log_skip(thread_id, user_id, consolidated, "skipped_phone", started)
             return
 
         if self._is_switch_active(lead):
             self.metrics.inc("webhook_skipped_switch_total")
             logger.info("Lead %s skipped due IA switch active.", lead_id)
+            await self._log_skip(thread_id, user_id, consolidated, "skipped_switch", started)
             return
 
         try:
@@ -262,13 +312,8 @@ class KommoWebhookProcessor:
             )
 
             if self.db_store.enabled:
-                await asyncio.to_thread(
-                    self.db_store.ensure_session,
-                    thread_id,
-                    user_id,
-                    {"lead_id": lead_id, **batch.context},
-                )
-                await asyncio.to_thread(self.db_store.add_message, thread_id, "user", consolidated)
+                # User message was already saved at the top of the flush,
+                # so only save the assistant reply here.
                 await asyncio.to_thread(self.db_store.add_message, thread_id, "assistant", plain_response)
                 await asyncio.to_thread(
                     self.db_store.log_agent_run,
