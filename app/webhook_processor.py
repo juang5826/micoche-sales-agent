@@ -413,6 +413,12 @@ class KommoWebhookProcessor:
             str(source_obj_id).strip(),
             str(source_id).strip(),
         }
+        # If no source data at all (API doesn't return it), allow the lead
+        # — pipeline + phone filters are strict enough for safety
+        candidates.discard("None")
+        if not candidates:
+            logger.debug("Lead %s has no source data — allowing.", lead.get("id"))
+            return True
         return expected in candidates
 
     def _is_pipeline_allowed(self, lead: dict[str, Any]) -> bool:
