@@ -27,7 +27,12 @@ _MAX_RESPONSE_CHARS = 800
 
 def sanitize_plain_text(text: str) -> str:
     out = _MARKDOWN_CHARS.sub("", text)
-    out = re.sub(r"\s+\n", "\n", out)
+    # Limpia espacios/tabs al final de cada linea, pero preserva los saltos
+    # de linea dobles que el prompt usa para separar bloques de info.
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    # Colapsa secuencias de mas de 2 saltos de linea a solo 2 (evita que el
+    # modelo deje 3 o 4 lineas vacias seguidas).
+    out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
 
 
