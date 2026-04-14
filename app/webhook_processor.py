@@ -232,7 +232,7 @@ class KommoWebhookProcessor:
             logger.info("Lead %s skipped — pipeline %s not allowed.", lead_id, lead.get("pipeline_id"))
             return
 
-        if not self._is_phone_allowed(batch.context.get("contact_id")):
+        if not self._is_phone_allowed(lead, batch.context.get("contact_id")):
             self.metrics.inc("webhook_skipped_phone_total")
             logger.info("Lead %s skipped — contact phone not in whitelist.", lead_id)
             return
@@ -440,37 +440,50 @@ class KommoWebhookProcessor:
 
         return True
 
-    def _is_phone_allowed(self, contact_id: int | str | None) -> bool:
-        """Check if the contact's phone is in the test whitelist.
-        If whitelist is empty, all phones are allowed."""
+    def _is_phone_allowed(self, lead: dict[str, Any], contact_id: int | str | None) -> bool:
+        """Check if any contact's phone is in the test whitelist.
+        Checks the webhook contact_id first, then falls back to the lead's
+        main contact.  If whitelist is empty, all phones are allowed."""
         whitelist = self.settings.test_phone_whitelist
         if not whitelist:
             return True  # No whitelist = allow all
 
-        if not contact_id:
-            logger.debug("No contact_id — cannot check phone whitelist.")
+        normalized_whitelist = {
+            p.replace("+", "").replace(" ", "").replace("-", "").strip()
+            for p in whitelist
+        }
+
+        # Build list of contact IDs to try: webhook contact first, then
+        # every contact embedded in the lead (main contact usually first).
+        candidate_ids: list[int] = []
+        if contact_id:
+            candidate_ids.append(int(contact_id))
+        for c in (lead.get("_embedded") or {}).get("contacts") or []:
+            cid = c.get("id")
+            if cid and int(cid) not in candidate_ids:
+                candidate_ids.append(int(cid))
+
+        if not candidate_ids:
+            logger.debug("Lead %s has no contacts — cannot check phone.", lead.get("id"))
             return False
 
-        try:
-            contact = self.kommo.get_contact(contact_id=int(contact_id))
-        except Exception:
-            logger.exception("Failed to get contact %s for phone check.", contact_id)
-            return False
+        for cid in candidate_ids:
+            try:
+                contact = self.kommo.get_contact(contact_id=cid)
+            except Exception:
+                logger.exception("Failed to get contact %s for phone check.", cid)
+                continue
+            phone = self._extract_contact_phone(contact)
+            if not phone:
+                continue
+            normalized_phone = phone.replace("+", "").replace(" ", "").replace("-", "").strip()
+            if normalized_phone in normalized_whitelist:
+                logger.debug("Contact %s phone %s matches whitelist.", cid, normalized_phone)
+                return True
+            logger.debug("Contact %s phone %s not in whitelist.", cid, normalized_phone)
 
-        # Extract phone from contact custom fields
-        phone = self._extract_contact_phone(contact)
-        if not phone:
-            logger.debug("Contact %s has no phone — skipped.", contact_id)
-            return False
-
-        # Normalize: strip +, spaces, dashes for comparison
-        normalized_phone = phone.replace("+", "").replace(" ", "").replace("-", "").strip()
-        normalized_whitelist = {p.replace("+", "").replace(" ", "").replace("-", "").strip() for p in whitelist}
-
-        allowed = normalized_phone in normalized_whitelist
-        if not allowed:
-            logger.info("Phone %s not in whitelist %s", normalized_phone, normalized_whitelist)
-        return allowed
+        logger.info("Lead %s: no contact phone matched whitelist %s", lead.get("id"), normalized_whitelist)
+        return False
 
     @staticmethod
     def _extract_contact_phone(contact: dict[str, Any]) -> str | None:
