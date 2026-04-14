@@ -19,15 +19,25 @@ class DBHealth:
 
 class PostgresStore:
     def __init__(self, dsn: str | None) -> None:
+        import logging
+        self._logger = logging.getLogger(__name__)
         self.dsn = (dsn or "").strip()
         self.enabled = bool(self.dsn)
         self._pool: SimpleConnectionPool | None = None
         if self.enabled:
-            self._pool = SimpleConnectionPool(
-                minconn=1,
-                maxconn=5,
-                dsn=self.dsn,
-            )
+            try:
+                self._pool = SimpleConnectionPool(
+                    minconn=1,
+                    maxconn=5,
+                    dsn=self.dsn,
+                )
+                self._logger.info("Postgres connection pool created OK.")
+            except Exception as exc:
+                self._logger.warning(
+                    "Postgres connection failed — running WITHOUT database persistence: %s", exc
+                )
+                self._pool = None
+                self.enabled = False
 
     @contextmanager
     def _conn(self) -> Iterator[Any]:
