@@ -115,33 +115,48 @@ class MiCocheMAFOrchestrator:
                 self._session_last_used.pop(tid, None)
             logger.info("Evicted %d sessions to stay under %d max.", to_remove, self._max_sessions)
 
-    def _get_or_create_session(self, thread_id: str) -> AgentSession:
+    def _get_or_create_session(self, thread_id: str) -> tuple[AgentSession, bool]:
+        """Return (session, is_new). is_new=True when the session was just created."""
         import time
         self._cleanup_stale_sessions()
 
-        if thread_id not in self._sessions:
-            session = self._agent.create_session()
-            # Restore conversation history from DB if available
-            if self._db_store and self._db_store.enabled:
-                try:
-                    history = self._db_store.get_recent_messages(thread_id, limit=20)
-                    if history:
-                        for msg in history:
-                            session.add_message(
-                                role=msg["role"],
-                                content=msg["content"],
-                            )
-                        logger.info(
-                            "Restored %d messages for thread %s from DB.",
-                            len(history),
-                            thread_id,
-                        )
-                except Exception:
-                    logger.exception("Failed to restore history for thread %s", thread_id)
-            self._sessions[thread_id] = session
+        is_new = thread_id not in self._sessions
+        if is_new:
+            self._sessions[thread_id] = self._agent.create_session()
 
         self._session_last_used[thread_id] = time.time()
-        return self._sessions[thread_id]
+        return self._sessions[thread_id], is_new
+
+    def _build_history_block(self, thread_id: str) -> str:
+        """Load last messages from DB and return a text block the LLM can read.
+
+        This is used when the in-memory session is new (after restart or
+        first contact) so the LLM has full conversation context even if
+        the MAF session object is empty.
+        """
+        if not self._db_store or not self._db_store.enabled:
+            return ""
+        try:
+            history = self._db_store.get_recent_messages(thread_id, limit=16)
+            if not history:
+                return ""
+            lines = []
+            for msg in history:
+                role = "Cliente" if msg["role"] == "user" else "Maria"
+                lines.append(f"{role}: {msg['content']}")
+            logger.info(
+                "Injecting %d history messages for thread %s into prompt.",
+                len(history),
+                thread_id,
+            )
+            return (
+                "\n[Conversacion anterior con este cliente:]\n"
+                + "\n".join(lines)
+                + "\n[Fin del historial. Responde al nuevo mensaje del cliente:]\n"
+            )
+        except Exception:
+            logger.exception("Failed to build history block for thread %s", thread_id)
+            return ""
 
     def answer(
         self,
@@ -154,7 +169,14 @@ class MiCocheMAFOrchestrator:
 
         if self._agent:
             try:
-                session = self._get_or_create_session(thread_id)
+                session, is_new = self._get_or_create_session(thread_id)
+
+                # If the in-memory session is new (server restarted or first
+                # message), inject conversation history from DB directly into
+                # the prompt so the LLM sees past context.
+                history_block = ""
+                if is_new:
+                    history_block = self._build_history_block(thread_id)
 
                 # Build context block from hint (filter internal keys)
                 context_block = ""
@@ -164,7 +186,7 @@ class MiCocheMAFOrchestrator:
                     context_lines = [f"- {k}: {v}" for k, v in safe_context.items()]
                     context_block = "\n\nContexto:\n" + "\n".join(context_lines)
 
-                full_message = f"{message}{context_block}".strip()
+                full_message = f"{history_block}{message}{context_block}".strip()
 
                 # Run agent with session (MAF handles memory + tool calls)
                 loop = None
