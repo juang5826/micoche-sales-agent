@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     skip_closed_statuses: bool = True
     # Phone whitelist for testing — only these numbers trigger the agent.
     # Empty list = respond to all. Format: ["573204549502"]
-    test_phone_whitelist: list[str] = ["573204549502", "573228610949"]
+    test_phone_whitelist: list[str] = ["573204549502", "573228610949", "573144784225"]
 
     request_timeout_seconds: int = 25
     startup_validate_integrations: bool = True
